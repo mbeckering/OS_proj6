@@ -37,6 +37,7 @@ void helpmessage(); //displays help message
 void setTimeToNextProc(); //sets time to next user process fork
 int isTimeToSpawnProc(); //returns 1 if it's time to fork a new user
 void setPageNumbers(); //assign syspage number ranges for all 18 possible users
+void printMap(); //prints memory map to log file
 
 /************************* GLOBAL VARIABLES ***********************************/
 
@@ -73,7 +74,7 @@ struct message {
     pid_t user_sys_pis; //actual user system pid (for wait/terminate)
     int userpid; //simulate user pid [0-17]
     char rw; //read/write request r=read w=write
-    int pagenum; //user's point-of-view page number request valid range [0-31]
+    int userpagenum; //user's point-of-view page number request valid range [0-31]
     int terminating; //1=user is reporting termination
 };
 //actual struct variable for msg queue
@@ -138,10 +139,12 @@ int main(int argc, char** argv) {
     printf("user 1 page 1 = page # %i\n", pagenumber[1][1]);
     printf("user 17 page 31 = page # %i\n", pagenumber[17][31]);
     
+    printMap();
+    
     /*********************** BEGIN MEMORY MANAGEMENT **************************/
     while (1) {
         //if it's time to fork a new user AND we're user the user limit
-        if (isTimeToSpawnProc() && currentusers < maxusers) {
+        if (isTimeToSpawnProc() && (currentusers < maxusers) ) {
             currentusers++;
             //fork a user
             //TODO: fork a user
@@ -160,6 +163,78 @@ int main(int argc, char** argv) {
 }
 
 /*************************** FUNCTION DEFINITIONS *****************************/
+
+void printMap(){
+    int i;
+    printf("Memory map:\n");
+    printf("[U=used frame, D=dirty frame, 0/1=refbit, .=unused]\n");
+    printf("Current head pointer position: frame %i\n", mem->refptr);
+    //status of first 64 frames
+    for (i=0; i<64; i++) {
+        if (mem->bitvector[i] == 0) printf(".");
+        else if (mem->dirtystatus == 0) printf("U");
+        else printf("D");
+    }
+    printf ("\n");
+    //status of first 64 reference bits
+    for (i=0; i<64; i++) {
+        if (mem->bitvector[i] == 1) {
+            if (mem->refbit == 0) printf("0");
+            else printf("1");
+        }
+        else printf(".");
+    }
+    printf ("\n");
+    //status of frames 64-127
+    for (i=64; i<128; i++) {
+        if (mem->bitvector[i] == 0) printf(".");
+        else if (mem->dirtystatus == 0) printf("U");
+        else printf("D");
+    }
+    printf ("\n");
+    //status of reference bits on frames 64-127
+    for (i=64; i<128; i++) {
+        if (mem->bitvector[i] == 1) {
+            if (mem->refbit == 0) printf("0");
+            else printf("1");
+        }
+        else printf(".");
+    }
+    printf ("\n");
+    //status of frames 128-191
+    for (i=128; i<192; i++) {
+        if (mem->bitvector[i] == 0) printf(".");
+        else if (mem->dirtystatus == 0) printf("U");
+        else printf("D");
+    }
+    printf ("\n");
+    //status of reference bits on frames 128-191
+    for (i=128; i<192; i++) {
+        if (mem->bitvector[i] == 1) {
+            if (mem->refbit == 0) printf("0");
+            else printf("1");
+        }
+        else printf(".");
+    }
+    printf ("\n");
+    //status of frames 192-255
+    for (i=192; i<256; i++) {
+        if (mem->bitvector[i] == 0) printf(".");
+        else if (mem->dirtystatus == 0) printf("U");
+        else printf("D");
+    }
+    printf ("\n");
+    //status of reference bits on frames 192-255
+    for (i=192; i<256; i++) {
+        if (mem->bitvector[i] == 1) {
+            if (mem->refbit == 0) printf("0");
+            else printf("1");
+        }
+        else printf(".");
+    }
+    printf ("\n");
+    
+}
 
 void setPageNumbers(){
     int proc, pagenum;

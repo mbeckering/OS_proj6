@@ -50,7 +50,7 @@ struct message {
     pid_t user_sys_pis; //actual user system pid (for wait/terminate)
     int userpid; //simulate user pid [0-17]
     char rw; //read/write request r=read w=write
-    int pagenum; //user's point-of-view page number request valid range [0-31]
+    int userpagenum; //user's point-of-view page number request valid range [0-31]
     int terminating; //1=user is reporting termination
 };
 struct message msg; //actual struct variable for msg queue

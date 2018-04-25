@@ -1,0 +1,9 @@
+Author: Mike Beckering
+Operating System Simulator: Virtual Memory Management
+Second-Chance FIFO Page Replacement Algorithm
+OSS fork/execs "user" processes at bounded intervals on a simulated sys clock.
+Up to 18 concurrent "user" processes continually request memory from OSS.
+Usage: ./oss [-p <1-18> ] p: number of concurrent users allowed
+
+Version control: https://github.com/mbeckering/OS_proj6
+
