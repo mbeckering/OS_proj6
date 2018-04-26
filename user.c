@@ -24,6 +24,8 @@
 /************************ FUNCTION PROTOTYPES *********************************/
 
 void initIPC(); //initialize IPC entities
+void setupRequest(); //roll to decide request nature and set msg struct vars
+void sendRequest(); //send the request message to oss
 
 /************************* GLOBAL VARIABLES ***********************************/
 
@@ -32,6 +34,9 @@ int shmid_mem; //shared memory ID holder for the liveState struct
 int shmid_qid; //shared memory ID holder for message queue
 static unsigned int *SC_secs; //pointer to shm sim clock (seconds)
 static unsigned int *SC_ns; //pointer to shm sim clock (nanoseconds)
+int seed; //for random rolls
+int my_pnum; //my sim process number
+int requestcounter; //tallies request count, roll to terminate every 1000 reqs
 
 //shared memory data structure for our system info needs
 struct memory {
@@ -47,6 +52,7 @@ struct memory memstruct; //actual struct
 
 //struct used in message queues
 struct message {
+    long msgtyp;
     pid_t user_sys_pis; //actual user system pid (for wait/terminate)
     int userpid; //simulate user pid [0-17]
     char rw; //read/write request r=read w=write
@@ -58,8 +64,84 @@ struct message msg; //actual struct variable for msg queue
 /******************************** MAIN ****************************************/
 
 int main(int argc, char** argv) {
+    my_pnum = atoi(argv[1]);
+    //set up seed and give it a roll
+    seed = (int) getpid();
+    rand_r(&seed);
+    
+    initIPC(); //initialize IPC resources
+    
+    //main loop: decide what to request, send it, wait for response, repeat
+    while(1) {
+        setupRequest();
+        sendRequest();
+        //WAIT for OSS response
+        if (msgrcv(shmid_qid, &msg, sizeof(msg), (my_pnum + 100), 0) == -1 ) {
+            perror("User: error in msgrcv");
+            exit(1);
+        }
+    }
 
     return (EXIT_SUCCESS);
+}
+
+void setupRequest() {
+    requestcounter++;
+    int roll = rand_r(&seed) % 10000 + 1;
+    //roll to terminate every 1000 requests
+    if (requestcounter >= 1000) {
+        requestcounter = 0;
+        //>=9000 means a 10% chance to terminate
+        if (roll >= 9000) {
+            //setup the message
+            msg.msgtyp = 99;
+            msg.terminating = 1;
+            msg.user_sys_pis = getpid();
+            msg.userpid = my_pnum;
+            //just send it and terminate right here cuz why not
+            if ( msgsnd(shmid_qid, &msg, sizeof(msg), 0) == -1 ) {
+                perror("User: error sending msg to oss");
+                exit(0);
+            }
+            printf("user %02i terminating\n", my_pnum);
+        }
+    }
+    //rolled to make invalid memory request, 1 means 1/10,000 chance
+    if (roll <= 1) {
+        msg.msgtyp = 99;
+        msg.rw = 'r';
+        msg.terminating = 0;
+        msg.user_sys_pis = getpid();
+        msg.userpagenum = 33; //invalid request
+        msg.userpid = my_pnum;
+    }
+    //rolled to make a read request
+    else if (roll <= 5000) {
+        roll = rand_r(&seed) % 32; //roll 0 to 32 to select user page request
+        msg.msgtyp = 99;
+        msg.rw = 'r';
+        msg.terminating = 0;
+        msg.user_sys_pis = getpid();
+        msg.userpagenum = roll; //invalid request
+        msg.userpid = my_pnum;
+    }
+    //rolled to make a write request
+        else {
+        roll = rand_r(&seed) % 32; //roll 0 to 32 to select user page request
+        msg.msgtyp = 99;
+        msg.rw = 'w';
+        msg.terminating = 0;
+        msg.user_sys_pis = getpid();
+        msg.userpagenum = roll; //invalid request
+        msg.userpid = my_pnum;
+    }
+}
+
+void sendRequest() {
+    if ( msgsnd(shmid_qid, &msg, sizeof(msg), 0) == -1 ) {
+        perror("User: error sending msg to oss");
+        exit(0);
+    }
 }
 
 void initIPC() {
@@ -89,7 +171,7 @@ void initIPC() {
         exit(1);
     }
     //message queue
-    if ( (shmid_qid = msgget(SHMKEY_msgq, 0777 | IPC_CREAT)) == -1 ) {
+    if ( (shmid_qid = msgget(SHMKEY_msgq, 0777 )) == -1 ) {
         perror("OSS: Error generating message queue");
         exit(0);
     }

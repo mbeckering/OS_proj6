@@ -38,6 +38,10 @@ void setTimeToNextProc(); //sets time to next user process fork
 int isTimeToSpawnProc(); //returns 1 if it's time to fork a new user
 void setPageNumbers(); //assign syspage number ranges for all 18 possible users
 void printMap(); //prints memory map to log file
+int nextUserNumber(); //returns next open user sim pid, -1 if full
+void forkUser(); //forks a user process
+void killchildren(); //kills all living children
+void terminateUser(int, pid_t); //kills the user if its alive, frees sim memory
 
 /************************* GLOBAL VARIABLES ***********************************/
 
@@ -54,6 +58,12 @@ int pagenumber[18][32]; //returns actual page # depending on process # and
                             //that process's logical page #: process 0 gets
                             //pages 0-31, p1 gets 32-63, p2 gets 64-95, etc
 pid_t childpids[18]; //stores actual system children pids to kill upon interrupt
+int userbitvector[18]; //stores what children are currently running
+int currentusers = 0; //current living user processes in the system
+char str_arg1[10]; //string arg for exec calls
+pid_t childpid; //for determining child code after fork
+int next_pnum = 0; //sim pid for next user process
+int maxusers; //max concurrent users
 
 //shared memory data structure for our system info needs
 struct memory {
@@ -71,10 +81,11 @@ struct memory memstruct; //actual struct
 
 //struct used in message queues
 struct message {
+    long msgtyp;
     pid_t user_sys_pis; //actual user system pid (for wait/terminate)
     int userpid; //simulate user pid [0-17]
     char rw; //read/write request r=read w=write
-    int userpagenum; //user's point-of-view page number request valid range [0-31]
+    int userpagenum; //user's PoV page number request valid range [0-31]
     int terminating; //1=user is reporting termination
 };
 //actual struct variable for msg queue
@@ -87,8 +98,7 @@ int main(int argc, char** argv) {
     maxTimeBetweenProcsNS = 500000000; //500ms max time between user forks
     maxTimeBetweenProcsSecs = 0; //0 seconds max time between user forks
     double runtime = 2; //seconds before interrupt & termination
-    int maxusers = 18; //maximum concurrent users processes in the system
-    int currentusers = 0; //current living user processes in the system
+    maxusers = 18; //maximum concurrent users processes in the system
     int option; //for getopt
     
     //set up interrupt handling for SIGINT and timed interrupt
@@ -130,39 +140,136 @@ int main(int argc, char** argv) {
     setTimeToNextProc();
     //go ahead and increment sim clock to that time to prevent useless looping
     incrementClock(spawnNextProcSecs, spawnNextProcNS);
-    
+    //set up our page number assignments for users
     setPageNumbers();
-    printf("user 0 page 0 = page # %i\n", pagenumber[0][0]);
-    printf("user 0 page 1 = page # %i\n", pagenumber[0][1]);
-    printf("user 0 page 2 = page # %i\n", pagenumber[0][2]);
-    printf("user 1 page 0 = page # %i\n", pagenumber[1][0]);
-    printf("user 1 page 1 = page # %i\n", pagenumber[1][1]);
-    printf("user 17 page 31 = page # %i\n", pagenumber[17][31]);
     
     printMap();
     
     /*********************** BEGIN MEMORY MANAGEMENT **************************/
     while (1) {
-        //if it's time to fork a new user AND we're user the user limit
+        //if all users are waiting on disk read, advance clock
+        
+        //TODO: Advance clock if all users are waiting
+        
+        //if it's time to fork a new user AND we're under the user limit
         if (isTimeToSpawnProc() && (currentusers < maxusers) ) {
+            forkUser();
             currentusers++;
-            //fork a user
-            //TODO: fork a user
+            setTimeToNextProc();
         }
         //if it's time to fork a new user but we're at the process limit
         else if (isTimeToSpawnProc() && (currentusers == maxusers) ) {
             //set a new time to spawn a user process
             setTimeToNextProc();
         }
+        //grab next request in queue from users (type 99)
+        printf("OSS: waiting for user msg\n");
+        if ( msgrcv(shmid_qid, &msg, sizeof(msg), 99, 0) == -1 ) {
+            perror("User: error in msgrcv");
+            clearIPC();
+            exit(0);
+        }
+        printf("OSS: received message msg\n");
+        //if user is terminating
+        if (msg.terminating == 1) {
+            printf("OSS: user %02i reported termination\n", msg.userpid); //***********log & add time
+            terminateUser(msg.userpid, msg.user_sys_pis);
+            currentusers--;
+            userbitvector[msg.userpid] = 0; //clear bit vector slot
+            childpids[msg.userpid] = 0; //clear stored system pid
+        }
+        //if user makes an invalid request
+        if ( (msg.userpagenum < 0) && (msg.userpagenum > 31) ) {
+            printf("OSS: user %02i made an invalid memory request, terminating it\n", msg.userpid); //***********log & add time
+            terminateUser(msg.userpid, msg.user_sys_pis);
+            currentusers--;
+            userbitvector[msg.userpid] = 0; //clear bit vector slot
+            childpids[msg.userpid] = 0; //clear stored system pid
+        }
+        
+        //if user has a read request
+            
+            //if its a hit, advance clock 10, set ref bit, send msg
+            
+            //else page fault, select an empty page to fill or a page to replace
+        
+        //if user has a write request
+        
+            //if its a hit, advance clock 10, set dirty bit, set ref bit, send msg
+            
+            //else page fault, select an empty page to fill or a page to replace
+        
     }
     /************************ END MEMORY MANAGEMENT ***************************/
     
     clearIPC();
+    killchildren();
 
     return (EXIT_SUCCESS);
 }
 
 /*************************** FUNCTION DEFINITIONS *****************************/
+
+void terminateUser(int simpid, pid_t syspid) {
+    int status, i, frame;
+    pid_t result;
+    //kill the child if it's not already dead
+    result = waitpid(syspid, &status, WNOHANG);
+    if (result == 0) {//child is still alive
+        kill(childpids[simpid], SIGINT);
+    }
+    //wait for child to finish dying
+    waitpid(syspid, &status, 0);
+    
+    //free the child's simulated memory resources
+    //for each of the child's 32 potential pages
+    for (i=0; i<32; i++) {
+        //if there's a frame occupied by this program's page
+        if(mem->pagetable[simpid][i] != -1) {
+            //clear the frame and reset its attribute
+            frame = mem->pagetable[simpid][i];
+            mem->refbit[frame] = 0;
+            mem->dirtystatus[frame] = 0;
+            mem->bitvector[frame] = 0;
+        }
+    }
+    printMap();
+}
+
+void forkUser() {
+    next_pnum = nextUserNumber();
+    userbitvector[next_pnum] = 1;
+    if (next_pnum == -1) {
+        printf("OSS: Error: attempted to fork user with full"
+               " user bitvector\n");
+        killchildren();
+        clearIPC();
+        exit(1);
+    }
+    if ( (childpid = fork()) < 0 ){ //terminate code
+        perror("OSS: Error forking user");
+        killchildren();
+        clearIPC();
+        exit(0);
+    }
+    if (childpid == 0) { //child code
+        sprintf(str_arg1, "%i", next_pnum); //build arg1 string
+        execlp("./user", "./user", str_arg1, (char *)NULL);
+        perror("OSS: execl() failure"); //report & exit if exec fails
+        exit(0);
+    }
+    childpids[next_pnum] = childpid;
+}
+
+int nextUserNumber() {
+    int i;
+    for (i=0; i<18; i++) {
+        if (userbitvector[i] == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
 
 void printMap(){
     int i;
@@ -240,6 +347,7 @@ void setPageNumbers(){
     int proc, pagenum;
     for (proc=0; proc<18; proc++) {
         for (pagenum=0; pagenum<32; pagenum++) {
+            mem->pagetable[proc][pagenum] = -1;
             pagenumber[proc][pagenum] = proc*32 + pagenum;
         }
     }
@@ -351,6 +459,20 @@ void helpmessage(){
     exit(0);
 }
 
+void killchildren() {
+    int sh_status, status, i;
+    pid_t sh_wpid, result;
+    for (i=0; i < maxusers ; i++) {
+        if (childpids[i] != 0) {
+            result = waitpid(childpids[i], &status, WNOHANG);
+            if (result == 0) {//child is still alive
+                kill(childpids[i], SIGINT);
+             waitpid(childpids[i], &status, 0);
+            }
+        }
+    }
+}
+
 /************************* INTERRUPT HANDLING *********************************/
 //this function taken from UNIX text
 static int setperiodic(double sec) {
@@ -384,7 +506,7 @@ static int setinterrupt() {
 static void interrupt(int signo, siginfo_t *info, void *context) {
     printf("OSS: Timer Interrupt Detected! signo = %d\n", signo);
     //fprintf(mlog, "OSS: Terminated: Timed Out\n");
-    //killchildren();
+    killchildren();
     //printStats();
     clearIPC();
     printf("OSS: Terminated: Timed Out\n");
@@ -394,7 +516,7 @@ static void interrupt(int signo, siginfo_t *info, void *context) {
 static void siginthandler(int sig_num) {
     printf("\nOSS: Interrupt detected! signo = %d\n", getpid(), sig_num);
     //fprintf(mlog, "OSS: Terminated: Interrupted by SIGINT\n");
-    //killchildren();
+    killchildren();
     //printStats();
     clearIPC();
     printf("OSS: Terminated: Interrupted\n");
