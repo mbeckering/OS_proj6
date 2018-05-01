@@ -1,10 +1,21 @@
+
 Author: Mike Beckering
 
-**4/26/18**UNFINISHED**
+4/26/18
+***UNFINISHED***
 
-This program us unfinished and not working, though most functions and pseudo 
-code are in place. I will use this as my do-over "project" 7, so feel free to 
-skip grading for now, or score as needed for an incomplete.
+This program us unfinished and not working, so feel free to skip grading for 
+now, or score as needed for an incomplete. Tough timing for me on this one 
+so I'm going to take advantage of the "project 7" do-over to replace this 
+grade.
+
+Implemented: user behavior, interrupt handling, message queue, shared memory 
+with sim clock and data structures for virtual memory management, user 
+termination procedures for both natural termination and invalid memory
+requests, fork/execcing user processes according to sim clock, getopt for 
+command line option to specify max # of concurrent user processes.
+
+TODO: OSS request handling (the main goal), logging, statistics output.
 
 Operating System Simulator: Virtual Memory Management
 Second-Chance FIFO Page Replacement Algorithm

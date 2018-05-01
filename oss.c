@@ -42,6 +42,12 @@ int nextUserNumber(); //returns next open user sim pid, -1 if full
 void forkUser(); //forks a user process
 void killchildren(); //kills all living children
 void terminateUser(int, pid_t); //kills the user if its alive, frees sim memory
+void sendMessage(int); //send message thru msg queue to specified user
+int findFrame(int, int); //accepts userpid & pagenum, returns frame location or -1
+void prepMessage(); //preps msg struct with no real info, just so user loops
+int nextOpenFrame(); //returns next open frame, -1 if all frames are full
+void pageToFrame(int, int, int); //sends page arg1 to frame arg2, arg3 dirtybit
+int frameToReplace(); //parses frames (clock algo) and returns frame# to replace
 
 /************************* GLOBAL VARIABLES ***********************************/
 
@@ -70,6 +76,7 @@ struct memory {
     int refbit[256]; //reference bit array: 0=lastchance 1=referenced
     int dirtystatus[256]; //dirty bit array: 0=clean, 1=dirty
     int bitvector[256]; //0=open frame 1=occupied frame
+    int frame[256]; //contains page number each frame is holding
     int refptr; //for FIFO enforcement, runs from [0-255] and resets to 0
     int pagetable[18][32]; //returns frame # / maps pages to frames:
                            //[process#][page#] = frame#, -1=unused page
@@ -84,7 +91,7 @@ struct message {
     long msgtyp;
     pid_t user_sys_pis; //actual user system pid (for wait/terminate)
     int userpid; //simulate user pid [0-17]
-    char rw; //read/write request r=read w=write
+    int rw; //read/write request 0 = read, 1 = write
     int userpagenum; //user's PoV page number request valid range [0-31]
     int terminating; //1=user is reporting termination
 };
@@ -100,6 +107,9 @@ int main(int argc, char** argv) {
     double runtime = 2; //seconds before interrupt & termination
     maxusers = 18; //maximum concurrent users processes in the system
     int option; //for getopt
+    int frameresult = 0; //stores result of findFrame() calls
+    int next_open_frame = 0;
+    int frame_to_replace = -1;
     
     //set up interrupt handling for SIGINT and timed interrupt
     signal (SIGINT, siginthandler);
@@ -132,8 +142,6 @@ int main(int argc, char** argv) {
     }
     printf("OSS: maximum concurrent user processes: %i\n", maxusers);
     
-    maxusers = 1; //************************************************************ TEMP FOR TESTING
-    
     initIPC();
     
     //set time for first user to spawn
@@ -154,6 +162,7 @@ int main(int argc, char** argv) {
         //if it's time to fork a new user AND we're under the user limit
         if (isTimeToSpawnProc() && (currentusers < maxusers) ) {
             forkUser();
+            printf("OSS: Forked user\n");
             currentusers++;
             setTimeToNextProc();
         }
@@ -163,13 +172,12 @@ int main(int argc, char** argv) {
             setTimeToNextProc();
         }
         //grab next request in queue from users (type 99)
-        printf("OSS: waiting for user msg\n");
         if ( msgrcv(shmid_qid, &msg, sizeof(msg), 99, 0) == -1 ) {
             perror("User: error in msgrcv");
             clearIPC();
             exit(0);
         }
-        printf("OSS: received message msg\n");
+        
         //if user is terminating
         if (msg.terminating == 1) {
             printf("OSS: user %02i reported termination\n", msg.userpid); //***********log & add time
@@ -178,8 +186,9 @@ int main(int argc, char** argv) {
             userbitvector[msg.userpid] = 0; //clear bit vector slot
             childpids[msg.userpid] = 0; //clear stored system pid
         }
+        
         //if user makes an invalid request
-        if ( (msg.userpagenum < 0) && (msg.userpagenum > 31) ) {
+        else if ( (msg.userpagenum < 0) && (msg.userpagenum > 31) ) {
             printf("OSS: user %02i made an invalid memory request, terminating it\n", msg.userpid); //***********log & add time
             terminateUser(msg.userpid, msg.user_sys_pis);
             currentusers--;
@@ -187,18 +196,50 @@ int main(int argc, char** argv) {
             childpids[msg.userpid] = 0; //clear stored system pid
         }
         
-        //if user has a read request
-            
-            //if its a hit, advance clock 10, set ref bit, send msg
-            
+        //handle user request
+        else {
+            //if its a hit, set ref bit, adv clock, send msg
+            frameresult = findFrame(msg.userpid, msg.userpagenum);
+            if (frameresult != -1) {
+                mem->refbit[frameresult] = 1;
+                //if it's a read request, advance clock 10ns
+                if (msg.rw == 0) {
+                    incrementClock(0, 10);
+                }
+                //if it's a write request, advance clock 15ms and set dirty bit
+                else if (msg.rw == 1) {
+                    mem->dirtystatus[frameresult] = 1;
+                    incrementClock(0, 15000000);
+                }
+                prepMessage();
+                sendMessage(msg.userpid);
+            }
             //else page fault, select an empty page to fill or a page to replace
-        
-        //if user has a write request
-        
-            //if its a hit, advance clock 10, set dirty bit, set ref bit, send msg
-            
-            //else page fault, select an empty page to fill or a page to replace
-        
+            else {
+                next_open_frame = nextOpenFrame();
+                //if memory is full, need to select a page to replace
+                if (next_open_frame == -1) {
+                    frame_to_replace = frameToReplace();
+                    pageToFrame(pagenumber[msg.userpid][msg.userpagenum],
+                            frame_to_replace, 0);
+                    mem->pagetable[msg.userpid][msg.userpagenum] = frame_to_replace;
+                    prepMessage();
+                    sendMessage(msg.userpid);
+                    //increment 15ms to represent disk read
+                    incrementClock(0, 15000000);
+                }
+                //otherwise, place this page in the next open frame
+                else {
+                    pageToFrame(pagenumber[msg.userpid][msg.userpagenum],
+                            next_open_frame, 0);
+                    mem->pagetable[msg.userpid][msg.userpagenum] = next_open_frame;
+                    prepMessage();
+                    sendMessage(msg.userpid);
+                    //increment 15ms to represent disk read
+                    incrementClock(0, 15000000);
+                }
+            }
+        }
     }
     /************************ END MEMORY MANAGEMENT ***************************/
     
@@ -209,6 +250,73 @@ int main(int argc, char** argv) {
 }
 
 /*************************** FUNCTION DEFINITIONS *****************************/
+
+int frameToReplace() {
+    int framenum;
+    while(1) {
+        //if current pointer location is set, unset (last chance) & advance
+        if (mem->refbit[mem->refptr] == 1) {
+            mem->refbit[mem->refptr] = 0;
+            if (mem->refptr == 255) {mem->refptr = 0;}
+            else {mem->refptr++;}
+        }
+        //if current pointer location is on last chance, advance & replace
+        else {
+            framenum = mem->refptr;
+            if(mem->refptr == 255) {mem->refptr = 0;}
+            else {mem->refptr++;}
+            return framenum;
+        }
+    }
+}
+
+void pageToFrame(int pagenum, int framenum, int dirtybit) {
+    mem->refbit[framenum] = 1;
+    mem->dirtystatus[framenum] = dirtybit;
+    mem->bitvector[framenum] = 1;
+    mem->frame[framenum] = pagenum;
+    mem->pagelocation[pagenum] = framenum;
+}
+
+int nextOpenFrame() {
+    int i;
+    for (i=0; i<256; i++) {
+        if (mem->bitvector[i] == 0) {
+            return i;
+        }
+    }
+        return -1;
+}
+
+void prepMessage() {
+    msg.msgtyp = (msg.userpid + 100);
+    msg.rw = -1;
+    msg.terminating = -1;
+    msg.user_sys_pis = -1;
+    msg.userpagenum = -1;
+    msg.userpid = msg.userpid;
+}
+
+//returns frame number on hit, returns -1 if not a hit
+int findFrame(int userpid, int userpagenum){
+    int i;
+    //get page number we're looking for based on user's request
+    int actualpagenumber = pagenumber[userpid][userpagenum];
+    //get the frame number where it should be
+    int framenumber = mem->pagelocation[actualpagenumber];
+    //if it's there
+    if (mem->frame[framenumber] == actualpagenumber) {
+        return framenumber;
+    }
+    return -1;
+}
+
+void sendMessage(int userpid) {
+    if ( msgsnd(shmid_qid, &msg, sizeof(msg), 0) == -1 ) {
+        perror("User: error sending msg to oss");
+        exit(0);
+    }
+}
 
 void terminateUser(int simpid, pid_t syspid) {
     int status, i, frame;
@@ -226,11 +334,14 @@ void terminateUser(int simpid, pid_t syspid) {
     for (i=0; i<32; i++) {
         //if there's a frame occupied by this program's page
         if(mem->pagetable[simpid][i] != -1) {
-            //clear the frame and reset its attribute
+            //clear the frame and reset its attributes
             frame = mem->pagetable[simpid][i];
             mem->refbit[frame] = 0;
             mem->dirtystatus[frame] = 0;
             mem->bitvector[frame] = 0;
+            mem->frame[frame] = -1;
+            mem->pagetable[simpid][i] = -1;
+            mem->pagelocation[frame] = -1;
         }
     }
     printMap();
@@ -279,14 +390,14 @@ void printMap(){
     //status of first 64 frames
     for (i=0; i<64; i++) {
         if (mem->bitvector[i] == 0) printf(".");
-        else if (mem->dirtystatus == 0) printf("U");
+        else if (mem->dirtystatus[i] == 0) printf("U");
         else printf("D");
     }
     printf ("\n");
     //status of first 64 reference bits
     for (i=0; i<64; i++) {
         if (mem->bitvector[i] == 1) {
-            if (mem->refbit == 0) printf("0");
+            if (mem->refbit[i] == 0) printf("0");
             else printf("1");
         }
         else printf(".");
@@ -295,14 +406,14 @@ void printMap(){
     //status of frames 64-127
     for (i=64; i<128; i++) {
         if (mem->bitvector[i] == 0) printf(".");
-        else if (mem->dirtystatus == 0) printf("U");
+        else if (mem->dirtystatus[i] == 0) printf("U");
         else printf("D");
     }
     printf ("\n");
     //status of reference bits on frames 64-127
     for (i=64; i<128; i++) {
         if (mem->bitvector[i] == 1) {
-            if (mem->refbit == 0) printf("0");
+            if (mem->refbit[i] == 0) printf("0");
             else printf("1");
         }
         else printf(".");
@@ -311,14 +422,14 @@ void printMap(){
     //status of frames 128-191
     for (i=128; i<192; i++) {
         if (mem->bitvector[i] == 0) printf(".");
-        else if (mem->dirtystatus == 0) printf("U");
+        else if (mem->dirtystatus[i] == 0) printf("U");
         else printf("D");
     }
     printf ("\n");
     //status of reference bits on frames 128-191
     for (i=128; i<192; i++) {
         if (mem->bitvector[i] == 1) {
-            if (mem->refbit == 0) printf("0");
+            if (mem->refbit[i] == 0) printf("0");
             else printf("1");
         }
         else printf(".");
@@ -327,14 +438,14 @@ void printMap(){
     //status of frames 192-255
     for (i=192; i<256; i++) {
         if (mem->bitvector[i] == 0) printf(".");
-        else if (mem->dirtystatus == 0) printf("U");
+        else if (mem->dirtystatus[i] == 0) printf("U");
         else printf("D");
     }
     printf ("\n");
     //status of reference bits on frames 192-255
     for (i=192; i<256; i++) {
         if (mem->bitvector[i] == 1) {
-            if (mem->refbit == 0) printf("0");
+            if (mem->refbit[i] == 0) printf("0");
             else printf("1");
         }
         else printf(".");
@@ -350,6 +461,9 @@ void setPageNumbers(){
             mem->pagetable[proc][pagenum] = -1;
             pagenumber[proc][pagenum] = proc*32 + pagenum;
         }
+    }
+    for (pagenum = 0; pagenum < 576; pagenum++) {
+        mem->pagelocation[pagenum] = -1;
     }
 }
 
@@ -506,6 +620,7 @@ static int setinterrupt() {
 static void interrupt(int signo, siginfo_t *info, void *context) {
     printf("OSS: Timer Interrupt Detected! signo = %d\n", signo);
     //fprintf(mlog, "OSS: Terminated: Timed Out\n");
+    printMap();
     killchildren();
     //printStats();
     clearIPC();

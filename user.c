@@ -43,6 +43,7 @@ struct memory {
     int refbit[256]; //reference bit array: -1=free 0=lastchance 1=referenced
     char dirty[256]; //dirty bit array: .=free U=used(clean) D=dirty
     int bitvector[256]; //0=unused frame 1=occupied frame
+    int frame[256]; //contains page number each frame is holding
     int refptr; //for FIFO enforcement
     int pagetable[18][32]; //maps pages to frames:
                             //[process#][page#] = frame#, -1=unused page
@@ -55,7 +56,7 @@ struct message {
     long msgtyp;
     pid_t user_sys_pis; //actual user system pid (for wait/terminate)
     int userpid; //simulate user pid [0-17]
-    char rw; //read/write request r=read w=write
+    int rw; //read/write request r=read w=write
     int userpagenum; //user's point-of-view page number request valid range [0-31]
     int terminating; //1=user is reporting termination
 };
@@ -109,7 +110,7 @@ void setupRequest() {
     //rolled to make invalid memory request, 1 means 1/10,000 chance
     if (roll <= 1) {
         msg.msgtyp = 99;
-        msg.rw = 'r';
+        msg.rw = 0;
         msg.terminating = 0;
         msg.user_sys_pis = getpid();
         msg.userpagenum = 33; //invalid request
@@ -119,20 +120,20 @@ void setupRequest() {
     else if (roll <= 5000) {
         roll = rand_r(&seed) % 32; //roll 0 to 32 to select user page request
         msg.msgtyp = 99;
-        msg.rw = 'r';
+        msg.rw = 0;
         msg.terminating = 0;
         msg.user_sys_pis = getpid();
-        msg.userpagenum = roll; //invalid request
+        msg.userpagenum = roll;
         msg.userpid = my_pnum;
     }
     //rolled to make a write request
-        else {
+    else {
         roll = rand_r(&seed) % 32; //roll 0 to 32 to select user page request
         msg.msgtyp = 99;
-        msg.rw = 'w';
+        msg.rw = 1;
         msg.terminating = 0;
         msg.user_sys_pis = getpid();
-        msg.userpagenum = roll; //invalid request
+        msg.userpagenum = roll;
         msg.userpid = my_pnum;
     }
 }
