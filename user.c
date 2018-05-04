@@ -94,25 +94,24 @@ void setupRequest() {
                 perror("User: error sending msg to oss");
                 exit(0);
             }
-            printf("user %02i terminating\n", my_pnum);
         }
     }
     //rolled to make invalid memory request, 1 means 1/10,000 chance
-    if (roll <= 1) {
+    if (roll <= 0) {
         msg.rw = 0;
         msg.terminating = 0;
         msg.userpagenum = 33; //invalid request
     }
     //rolled to make a read request
     else if (roll <= 5000) {
-        roll = rand_r(&seed) % 32; //roll 0 to 32 to select user page request
+        roll = rand_r(&seed) % 32; //roll 0 to 31 to select user page request
         msg.rw = 0;
         msg.terminating = 0;
         msg.userpagenum = roll;
     }
     //rolled to make a write request
     else {
-        roll = rand_r(&seed) % 32; //roll 0 to 32 to select user page request
+        roll = rand_r(&seed) % 32; //roll 0 to 31 to select user page request
         msg.rw = 1;
         msg.terminating = 0;
         msg.userpagenum = roll;

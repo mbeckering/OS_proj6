@@ -43,7 +43,7 @@ void forkUser(); //forks a user process
 void killchildren(); //kills all living children
 void terminateUser(int, pid_t); //kills the user if its alive, frees sim memory
 void sendMessage(int); //send message thru msg queue to specified user
-int findFrame(int, int); //accepts userpid & pagenum, returns frame location or -1
+int findPage(int, int); //accepts userpid & pagenum, returns frame location or -1
 void prepMessage(); //preps msg struct with no real info, just so user loops
 int nextOpenFrame(); //returns next open frame, -1 if all frames are full
 void pageToFrame(int, int, int); //sends page arg1 to frame arg2, arg3 dirtybit
@@ -107,9 +107,10 @@ int main(int argc, char** argv) {
     double runtime = 2; //seconds before interrupt & termination
     maxusers = 18; //maximum concurrent users processes in the system
     int option; //for getopt
-    int frameresult = 0; //stores result of findFrame() calls
+    int frameresult = 0; //stores result of findPage() calls
     int next_open_frame = 0;
     int frame_to_replace = -1;
+    int page_to_send = -1;
     
     //set up interrupt handling for SIGINT and timed interrupt
     signal (SIGINT, siginthandler);
@@ -162,7 +163,6 @@ int main(int argc, char** argv) {
         //if it's time to fork a new user AND we're under the user limit
         if (isTimeToSpawnProc() && (currentusers < maxusers) ) {
             forkUser();
-            printf("OSS: Forked user\n");
             currentusers++;
             setTimeToNextProc();
         }
@@ -188,18 +188,18 @@ int main(int argc, char** argv) {
         }
         
         //if user makes an invalid request
-        else if ( (msg.userpagenum < 0) && (msg.userpagenum > 31) ) {
+        else if ( (msg.userpagenum < 0) || (msg.userpagenum > 31) ) {
             printf("OSS: user %02i made an invalid memory request, terminating it\n", msg.userpid); //***********log & add time
+            userbitvector[msg.userpid] = 0; //clear bit vector slot
             terminateUser(msg.userpid, msg.user_sys_pis);
             currentusers--;
-            userbitvector[msg.userpid] = 0; //clear bit vector slot
             childpids[msg.userpid] = 0; //clear stored system pid
         }
         
         //handle user request
         else {
             //if its a hit, set ref bit, adv clock, send msg
-            frameresult = findFrame(msg.userpid, msg.userpagenum);
+            frameresult = findPage(msg.userpid, msg.userpagenum);
             if (frameresult != -1) {
                 mem->refbit[frameresult] = 1;
                 //if it's a read request, advance clock 10ns
@@ -230,8 +230,8 @@ int main(int argc, char** argv) {
                 }
                 //otherwise, place this page in the next open frame
                 else {
-                    pageToFrame(pagenumber[msg.userpid][msg.userpagenum],
-                            next_open_frame, 0);
+                    page_to_send = pagenumber[msg.userpid][msg.userpagenum];
+                    pageToFrame(page_to_send, next_open_frame, 0);
                     mem->pagetable[msg.userpid][msg.userpagenum] = next_open_frame;
                     prepMessage();
                     sendMessage(msg.userpid);
@@ -298,15 +298,29 @@ void prepMessage() {
 }
 
 //returns frame number on hit, returns -1 if not a hit
-int findFrame(int userpid, int userpagenum){
-    int i;
+int findPage(int userpid, int userpagenum){
+    int i, actualpagenumber, framenumber;
     //get page number we're looking for based on user's request
-    int actualpagenumber = pagenumber[userpid][userpagenum];
+    actualpagenumber = pagenumber[userpid][userpagenum];
     //get the frame number where it should be
-    int framenumber = mem->pagelocation[actualpagenumber];
+    framenumber = mem->pagelocation[actualpagenumber];
+    //BUG BUST: Make sure not to count -1 framenumber as a hit, ever
+    if (framenumber == -1) {
+        return -1;
+    }
     //if it's there
     if (mem->frame[framenumber] == actualpagenumber) {
+        //printf("found page %i in frame %i\n", actualpagenumber, framenumber);
         return framenumber;
+    }
+    for(i=0; i<256; i++) {
+        if (mem->frame[i] == actualpagenumber) {
+            printf("BUG BUSTING: FAILED TO FIND PAGE %i THOUGH IT'S AT FRAME %i\n", actualpagenumber, i);
+            killchildren();
+            clearIPC();
+            exit(1);
+        }
+        
     }
     return -1;
 }
@@ -319,7 +333,7 @@ void sendMessage(int userpid) {
 }
 
 void terminateUser(int simpid, pid_t syspid) {
-    int status, i, frame;
+    int status, i, frame, page;
     pid_t result;
     //kill the child if it's not already dead
     result = waitpid(syspid, &status, WNOHANG);
@@ -336,20 +350,23 @@ void terminateUser(int simpid, pid_t syspid) {
         if(mem->pagetable[simpid][i] != -1) {
             //clear the frame and reset its attributes
             frame = mem->pagetable[simpid][i];
+            page = pagenumber[simpid][i];
             mem->refbit[frame] = 0;
             mem->dirtystatus[frame] = 0;
             mem->bitvector[frame] = 0;
             mem->frame[frame] = -1;
             mem->pagetable[simpid][i] = -1;
-            mem->pagelocation[frame] = -1;
+            mem->pagelocation[page] = -1;
         }
     }
+    printf("OSS: after terminating user %i:\n", simpid);
     printMap();
 }
 
 void forkUser() {
     next_pnum = nextUserNumber();
     userbitvector[next_pnum] = 1;
+    printf("OSS: Forked user %i\n", next_pnum);
     if (next_pnum == -1) {
         printf("OSS: Error: attempted to fork user with full"
                " user bitvector\n");
@@ -384,45 +401,61 @@ int nextUserNumber() {
 
 void printMap(){
     int i;
-    printf("Memory map:\n");
-    printf("[U=used frame, D=dirty frame, 0/1=refbit, .=unused]\n");
+    //printf("Memory map:\n");
+    //printf("[U=used frame, D=dirty frame, 0/1=refbit, .=unused]\n");
     printf("Current head pointer position: frame %i\n", mem->refptr);
     //status of first 128 frames
     for (i=0; i<128; i++) {
+        if (i==0) printf("[");
         if (mem->bitvector[i] == 0) printf(".");
         else if (mem->dirtystatus[i] == 0) printf("U");
         else printf("D");
+        if (i==31 || i== 63) printf("][");
+        else if (i==95) printf("][");
+        else if (i==127) printf("]");
     }
     printf ("\n");
     //status of first 64 reference bits
     for (i=0; i<128; i++) {
+        if (i==0) printf("[");
         if (mem->bitvector[i] == 1) {
             if (mem->refbit[i] == 0) printf("0");
             else printf("1");
         }
         else printf(".");
+        if (i==31 || i== 63) printf("][");
+        else if (i==95) printf("][");
+        else if (i==127) printf("]");
     }
     printf ("\n");
     //status of frames 128-255
     for (i=128; i<256; i++) {
+        if (i==128) printf("[");
         if (mem->bitvector[i] == 0) printf(".");
         else if (mem->dirtystatus[i] == 0) printf("U");
         else printf("D");
+        if (i==159 || i==191) printf("][");
+        else if (i==223) printf("][");
+        else if (i==255) printf("]");
     }
     printf ("\n");
     //status of reference bits on frames 128-191
     for (i=128; i<256; i++) {
+        if (i==128) printf("[");
         if (mem->bitvector[i] == 1) {
             if (mem->refbit[i] == 0) printf("0");
             else printf("1");
         }
         else printf(".");
+        if (i==159 || i==191) printf("][");
+        else if (i==223) printf("][");
+        else if (i==255) printf("]");
     }
     printf ("\n");
 }
 
 void setPageNumbers(){
-    int proc, pagenum;
+    int proc, pagenum, i;
     for (proc=0; proc<18; proc++) {
         for (pagenum=0; pagenum<32; pagenum++) {
             mem->pagetable[proc][pagenum] = -1;
@@ -431,6 +464,9 @@ void setPageNumbers(){
     }
     for (pagenum = 0; pagenum < 576; pagenum++) {
         mem->pagelocation[pagenum] = -1;
+    }
+    for (i=0; i<256; i++) {
+        mem->frame[i] = -1;
     }
 }
 
@@ -587,6 +623,7 @@ static int setinterrupt() {
 static void interrupt(int signo, siginfo_t *info, void *context) {
     printf("OSS: Timer Interrupt Detected! signo = %d\n", signo);
     //fprintf(mlog, "OSS: Terminated: Timed Out\n");
+    printf("OSS: Memory map before termination:\n");
     printMap();
     killchildren();
     //printStats();
