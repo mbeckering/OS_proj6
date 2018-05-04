@@ -38,19 +38,6 @@ int seed; //for random rolls
 int my_pnum; //my sim process number
 int requestcounter; //tallies request count, roll to terminate every 1000 reqs
 
-//shared memory data structure for our system info needs
-struct memory {
-    int refbit[256]; //reference bit array: -1=free 0=lastchance 1=referenced
-    char dirty[256]; //dirty bit array: .=free U=used(clean) D=dirty
-    int bitvector[256]; //0=unused frame 1=occupied frame
-    int frame[256]; //contains page number each frame is holding
-    int refptr; //for FIFO enforcement
-    int pagetable[18][32]; //maps pages to frames:
-                            //[process#][page#] = frame#, -1=unused page
-};
-struct memory *mem; //struct pointer for our memory information
-struct memory memstruct; //actual struct
-
 //struct used in message queues
 struct message {
     long msgtyp;
@@ -88,18 +75,21 @@ int main(int argc, char** argv) {
 
 void setupRequest() {
     requestcounter++;
-    int roll = rand_r(&seed) % 10000 + 1;
+    int roll = rand_r(&seed) % 10000 + 1; //roll from 1 to 10,000
+    
+    //these 3 message attributes are always the same regardless of situation
+    msg.msgtyp = 99;
+    msg.user_sys_pis = getpid();
+    msg.userpid = my_pnum;
+    
     //roll to terminate every 1000 requests
     if (requestcounter >= 1000) {
         requestcounter = 0;
-        //>=9000 means a 10% chance to terminate
+        //>=9000 means a 10% chance to terminate every 1000 requests
         if (roll >= 9000) {
             //setup the message
-            msg.msgtyp = 99;
             msg.terminating = 1;
-            msg.user_sys_pis = getpid();
-            msg.userpid = my_pnum;
-            //just send it and terminate right here cuz why not
+            //just send it and terminate right here cuz why not? efficient.
             if ( msgsnd(shmid_qid, &msg, sizeof(msg), 0) == -1 ) {
                 perror("User: error sending msg to oss");
                 exit(0);
@@ -109,32 +99,23 @@ void setupRequest() {
     }
     //rolled to make invalid memory request, 1 means 1/10,000 chance
     if (roll <= 1) {
-        msg.msgtyp = 99;
         msg.rw = 0;
         msg.terminating = 0;
-        msg.user_sys_pis = getpid();
         msg.userpagenum = 33; //invalid request
-        msg.userpid = my_pnum;
     }
     //rolled to make a read request
     else if (roll <= 5000) {
         roll = rand_r(&seed) % 32; //roll 0 to 32 to select user page request
-        msg.msgtyp = 99;
         msg.rw = 0;
         msg.terminating = 0;
-        msg.user_sys_pis = getpid();
         msg.userpagenum = roll;
-        msg.userpid = my_pnum;
     }
     //rolled to make a write request
     else {
         roll = rand_r(&seed) % 32; //roll 0 to 32 to select user page request
-        msg.msgtyp = 99;
         msg.rw = 1;
         msg.terminating = 0;
-        msg.user_sys_pis = getpid();
         msg.userpagenum = roll;
-        msg.userpid = my_pnum;
     }
 }
 
@@ -160,17 +141,6 @@ void initIPC() {
             exit(1);
         }
     SC_ns = (unsigned int*) shmat(shmid_sim_ns, 0, 0);
-    //shared memory for memory struct
-    shmid_mem = shmget(SHMKEY_memstruct, sizeof(memstruct), 0777);
-    if (shmid_mem == -1) { //terminate if shmget failed
-            perror("OSS: error in shmget for memory struct");
-            exit(1);
-        }
-    mem = (struct memory *) shmat(shmid_mem, NULL, 0);
-    if (mem == (struct memory *)(-1) ) {
-        perror("OSS: error in shmat liveState");
-        exit(1);
-    }
     //message queue
     if ( (shmid_qid = msgget(SHMKEY_msgq, 0777 )) == -1 ) {
         perror("OSS: Error generating message queue");

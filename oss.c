@@ -143,13 +143,13 @@ int main(int argc, char** argv) {
     printf("OSS: maximum concurrent user processes: %i\n", maxusers);
     
     initIPC();
+    //set up our page number assignments for users
+    setPageNumbers();
     
     //set time for first user to spawn
     setTimeToNextProc();
     //go ahead and increment sim clock to that time to prevent useless looping
     incrementClock(spawnNextProcSecs, spawnNextProcNS);
-    //set up our page number assignments for users
-    setPageNumbers();
     
     printMap();
     
@@ -387,15 +387,15 @@ void printMap(){
     printf("Memory map:\n");
     printf("[U=used frame, D=dirty frame, 0/1=refbit, .=unused]\n");
     printf("Current head pointer position: frame %i\n", mem->refptr);
-    //status of first 64 frames
-    for (i=0; i<64; i++) {
+    //status of first 128 frames
+    for (i=0; i<128; i++) {
         if (mem->bitvector[i] == 0) printf(".");
         else if (mem->dirtystatus[i] == 0) printf("U");
         else printf("D");
     }
     printf ("\n");
     //status of first 64 reference bits
-    for (i=0; i<64; i++) {
+    for (i=0; i<128; i++) {
         if (mem->bitvector[i] == 1) {
             if (mem->refbit[i] == 0) printf("0");
             else printf("1");
@@ -403,31 +403,15 @@ void printMap(){
         else printf(".");
     }
     printf ("\n");
-    //status of frames 64-127
-    for (i=64; i<128; i++) {
-        if (mem->bitvector[i] == 0) printf(".");
-        else if (mem->dirtystatus[i] == 0) printf("U");
-        else printf("D");
-    }
-    printf ("\n");
-    //status of reference bits on frames 64-127
-    for (i=64; i<128; i++) {
-        if (mem->bitvector[i] == 1) {
-            if (mem->refbit[i] == 0) printf("0");
-            else printf("1");
-        }
-        else printf(".");
-    }
-    printf ("\n");
-    //status of frames 128-191
-    for (i=128; i<192; i++) {
+    //status of frames 128-255
+    for (i=128; i<256; i++) {
         if (mem->bitvector[i] == 0) printf(".");
         else if (mem->dirtystatus[i] == 0) printf("U");
         else printf("D");
     }
     printf ("\n");
     //status of reference bits on frames 128-191
-    for (i=128; i<192; i++) {
+    for (i=128; i<256; i++) {
         if (mem->bitvector[i] == 1) {
             if (mem->refbit[i] == 0) printf("0");
             else printf("1");
@@ -435,23 +419,6 @@ void printMap(){
         else printf(".");
     }
     printf ("\n");
-    //status of frames 192-255
-    for (i=192; i<256; i++) {
-        if (mem->bitvector[i] == 0) printf(".");
-        else if (mem->dirtystatus[i] == 0) printf("U");
-        else printf("D");
-    }
-    printf ("\n");
-    //status of reference bits on frames 192-255
-    for (i=192; i<256; i++) {
-        if (mem->bitvector[i] == 1) {
-            if (mem->refbit[i] == 0) printf("0");
-            else printf("1");
-        }
-        else printf(".");
-    }
-    printf ("\n");
-    
 }
 
 void setPageNumbers(){
