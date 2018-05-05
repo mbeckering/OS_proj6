@@ -60,6 +60,7 @@ void unsuspendUser(int); //updates suspended queue and messages user
 
 void printQueue(); //these functions for obliterating bugs
 void printClock();
+void printvector();
 
 /************************* GLOBAL VARIABLES ***********************************/
 
@@ -82,6 +83,14 @@ char str_arg1[10]; //string arg for exec calls
 pid_t childpid; //for determining child code after fork
 int next_pnum = 0; //sim pid for next user process
 int maxusers; //max concurrent users
+
+//struct for storing those sweet statistics
+struct statistics {
+    int normal_terminations;
+    int segfault_terminations;
+};
+
+struct statistics stats;
 
 //data structure for our system info needs
 struct memory {
@@ -133,6 +142,7 @@ int main(int argc, char** argv) {
     int frame_to_replace = -1;
     int page_to_send = -1;
     int usernum_unsuspend = -1;
+    int loops = 0;
     
     //set up interrupt handling for SIGINT and timed interrupt
     signal (SIGINT, siginthandler);
@@ -179,20 +189,7 @@ int main(int argc, char** argv) {
     
     /*********************** BEGIN MEMORY MANAGEMENT **************************/
     while (1) {
-        usernum_unsuspend = getNextProcFromQueue(); //-1 if queue is empty
-        //if next suspended process's read is finished, notify it to continue
-        if ( (usernum_unsuspend != -1) && isReady(usernum_unsuspend)) {
-            unsuspendUser(usernum_unsuspend);
-        }
-        //if all users are waiting on disk read
-        else if (numSuspendedProcs() == maxusers) {
-            usernum_unsuspend = getNextProcFromQueue();
-            //advance clock accordingly
-            *SC_secs = susp.ready_sec[usernum_unsuspend];
-            *SC_ns = susp.ready_ns[usernum_unsuspend];
-            unsuspendUser(usernum_unsuspend);
-        }
-        
+        incrementClock(0, 45000);
         //if it's time to fork a new user AND we're under the user limit
         if (isTimeToSpawnProc() && (currentusers < maxusers) ) {
             forkUser();
@@ -204,6 +201,29 @@ int main(int argc, char** argv) {
             //set a new time to spawn a user process
             setTimeToNextProc();
         }
+        //if there are no users the system
+        else if (currentusers == 0) {
+            forkUser();
+            currentusers++;
+            setTimeToNextProc();
+        }
+        
+        usernum_unsuspend = getNextProcFromQueue(); //-1 if queue is empty
+        //if the suspended queue is occupied
+        if (usernum_unsuspend != -1) {
+            //if next suspended process's read is finished, notify it to continue
+            if (isReady(usernum_unsuspend)) {
+                unsuspendUser(usernum_unsuspend);
+            }
+            //if all users are waiting on disk read
+            else if (numSuspendedProcs() == currentusers) {
+                //advance clock accordingly
+                *SC_secs = susp.ready_sec[usernum_unsuspend];
+                *SC_ns = susp.ready_ns[usernum_unsuspend];
+                unsuspendUser(usernum_unsuspend);
+            }
+        }
+        
         //grab next request in queue from users (type 99)
         if ( msgrcv(shmid_qid, &msg, sizeof(msg), 99, 0) == -1 ) {
             perror("User: error in msgrcv");
@@ -215,6 +235,7 @@ int main(int argc, char** argv) {
         if (msg.terminating == 1) {
             printf("OSS: user %02i reported termination\n", msg.userpid); //***********log & add time
             terminateUser(msg.userpid, msg.user_sys_pis);
+            stats.normal_terminations++;
             currentusers--;
             userbitvector[msg.userpid] = 0; //clear bit vector slot
             childpids[msg.userpid] = 0; //clear stored system pid
@@ -222,6 +243,7 @@ int main(int argc, char** argv) {
         
         //if user makes an invalid request
         else if ( (msg.userpagenum < 0) || (msg.userpagenum > 31) ) {
+            stats.segfault_terminations++;
             printf("OSS: user %02i made an invalid memory request, terminating it\n", msg.userpid); //***********log & add time
             userbitvector[msg.userpid] = 0; //clear bit vector slot
             terminateUser(msg.userpid, msg.user_sys_pis);
@@ -242,12 +264,12 @@ int main(int argc, char** argv) {
                 //if it's a write request, advance clock more and set dirty bit
                 else if (msg.rw == 1) {
                     mem->dirtystatus[frameresult] = 1;
-                    incrementClock(0, 150);
+                    incrementClock(0, 350);
                 }
                 prepMessage();
                 sendMessage(msg.userpid);
             }
-            //else page fault, select an empty page to fill or a page to replace
+            //else page fault, select an empty frame to fill or a frame to replace
             else {
                 next_open_frame = nextOpenFrame();
                 //if memory is full, need to select a page to replace
@@ -277,6 +299,24 @@ int main(int argc, char** argv) {
 
 /*************************** FUNCTION DEFINITIONS *****************************/
 
+void printStats() {
+    printf("OSS: memory map upon OSS termination:\n");
+    printMap();
+    printf("Users terminated successfully: %i\n", stats.normal_terminations);
+    printf("Users committed segfaults and terminated by OSS: %i\n", 
+        stats.segfault_terminations);
+    printf("OSS: termination at %u:%09u\n", *SC_secs, *SC_ns);
+}
+
+void printvector() {
+    int i;
+    printf("Users: ");
+    for (i=0; i<18; i++) {
+        printf("%i,", userbitvector[i]);
+    }
+    printf("\n");
+}
+
 void printClock() {
     printf("OSS time: %u:%09u\n", *SC_secs, *SC_ns);
 }
@@ -285,6 +325,7 @@ void unsuspendUser(int pnum) {
     //update blocked queue
     removeProcFromQueue(pnum);
     //notify user to continue
+    prepMessage();
     msg.msgtyp = (pnum + 100);
     msg.userpid = pnum;
     sendMessage(pnum);
@@ -316,7 +357,8 @@ int isReady(int pnum) {
 }
 
 int numSuspendedProcs() {
-    int i, return_val;
+    int i;
+    int return_val = 0;
     for (i=0; i<18; i++) {
         if (susp.queue[i] != -1) {
             return_val++;
@@ -341,7 +383,7 @@ int removeProcFromQueue(int proc_num) {
                 susp.queue[i] = susp.queue[i+1];
                 i++;
             }
-            susp.queue[17] = -1; //once 18 is moved to 17, clear it up by setting to 0
+            susp.queue[17] = -1; //once 17 is moved to 16, clear 17
             return 1;
         }
     }
@@ -465,11 +507,18 @@ void terminateUser(int simpid, pid_t syspid) {
     //wait for child to finish dying
     waitpid(syspid, &status, 0);
     
+    //remove the terminated child from the blocked queue
+    removeProcFromQueue(simpid);
+    
     //free the child's simulated memory resources
     //for each of the child's 32 potential pages
     for (i=0; i<32; i++) {
         //if there's a frame occupied by this program's page
         if(mem->pagetable[simpid][i] != -1) {
+            //if it's a dirty bit, increment clock to read back to disk
+            if (mem->dirtystatus[frame] == 1) {
+                incrementClock(0, 100000);
+            }
             //clear the frame and reset its attributes
             frame = mem->pagetable[simpid][i];
             page = pagenumber[simpid][i];
@@ -481,14 +530,17 @@ void terminateUser(int simpid, pid_t syspid) {
             mem->pagelocation[page] = -1;
         }
     }
-    printf("OSS: after terminating user %i:\n", simpid);
-    printMap();
+    if (stats.normal_terminations % 10 == 0) {
+        printf("OSS: after terminating user %i:\n", simpid);
+        printMap();
+    }
 }
 
 void forkUser() {
     next_pnum = nextUserNumber();
     userbitvector[next_pnum] = 1;
-    printf("OSS: Forked user %i\n", next_pnum);
+    printf("OSS: forking user %02i ... now %i concurrent users\n", 
+        next_pnum, currentusers+1);
     if (next_pnum == -1) {
         printf("OSS: Error: attempted to fork user with full"
                " user bitvector\n");
@@ -743,13 +795,9 @@ static int setinterrupt() {
 }
 
 static void interrupt(int signo, siginfo_t *info, void *context) {
-    printf("OSS: Timer Interrupt Detected! signo = %d\n", signo);
-    //fprintf(mlog, "OSS: Terminated: Timed Out\n");
-    printf("OSS: Memory map before termination:\n");
-    printMap();
-    printClock();
+    printf("OSS: Timer interrupt detected! signo = %d\n", signo);
     killchildren();
-    //printStats();
+    printStats();
     clearIPC();
     printf("OSS: Terminated: Timed Out\n");
     exit(0);

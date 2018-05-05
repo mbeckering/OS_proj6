@@ -16,7 +16,6 @@
 
 #define SHMKEY_sim_s 4020012
 #define SHMKEY_sim_ns 4020013
-#define SHMKEY_memstruct 4020014
 #define SHMKEY_msgq 4020015
 #define BILLION 1000000000
 #define BUFF_SZ sizeof(unsigned int)
@@ -75,7 +74,7 @@ int main(int argc, char** argv) {
 
 void setupRequest() {
     requestcounter++;
-    int roll = rand_r(&seed) % 10000 + 1; //roll from 1 to 10,000
+    int roll = rand_r(&seed) % 100000 + 1; //roll from 1 to 10,000
     
     //these 3 message attributes are always the same regardless of situation
     msg.msgtyp = 99;
@@ -86,7 +85,7 @@ void setupRequest() {
     if (requestcounter >= 1000) {
         requestcounter = 0;
         //>=9000 means a 10% chance to terminate every 1000 requests
-        if (roll >= 9000) {
+        if (roll >= 90000) {
             //setup the message
             msg.terminating = 1;
             //just send it and terminate right here cuz why not? efficient.
@@ -97,13 +96,13 @@ void setupRequest() {
         }
     }
     //rolled to make invalid memory request, 1 means 1/10,000 chance
-    if (roll <= 0) {
+    if (roll <= 1) {
         msg.rw = 0;
         msg.terminating = 0;
         msg.userpagenum = 33; //invalid request
     }
     //rolled to make a read request
-    else if (roll <= 5000) {
+    else if (roll <= 50000) {
         roll = rand_r(&seed) % 32; //roll 0 to 31 to select user page request
         msg.rw = 0;
         msg.terminating = 0;
