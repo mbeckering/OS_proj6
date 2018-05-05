@@ -49,6 +49,7 @@ int nextOpenFrame(); //returns next open frame, -1 if all frames are full
 void pageToFrame(int, int, int); //sends page arg1 to frame arg2, arg3 dirtybit
 int frameToReplace(); //parses frames (clock algo) and returns frame# to replace
 void incrementAccessTime(unsigned int); //takes ns, accrues access time for stats
+void printMapLog();
 
 void initQueue(); //initialize the suspended queue
 int numSuspendedProcs(); //returns number of suspended user processes
@@ -65,6 +66,7 @@ void printvector();
 
 /************************* GLOBAL VARIABLES ***********************************/
 
+static FILE *mlog; // log file pointer
 int shmid_sim_secs, shmid_sim_ns; //shared memory ID holders for sim clock
 int shmid_mem; //shared memory ID holder for the liveState struct
 int shmid_qid; //shared memory ID holder for message queue
@@ -148,6 +150,7 @@ int main(int argc, char** argv) {
     int page_to_send = -1;
     int usernum_unsuspend = -1;
     int loops = 0;
+    int sec = 1; //for tracking when to print memory map to log
     
     //set up interrupt handling for SIGINT and timed interrupt
     signal (SIGINT, siginthandler);
@@ -180,6 +183,15 @@ int main(int argc, char** argv) {
     }
     printf("OSS: maximum concurrent user processes: %i\n", maxusers);
     
+    // Set up logging
+    mlog = fopen("master.log", "w");
+    if (mlog == NULL) {
+        perror("OSS: error opening log file");
+        return -1;
+    }
+    fprintf(mlog, "OSS: launched\n");
+    fprintf(mlog, "OSS: maximum concurrent users: %i\n", maxusers);
+    
     initQueue();
     initIPC();
     //set up our page number assignments for users
@@ -195,6 +207,11 @@ int main(int argc, char** argv) {
     /*********************** BEGIN MEMORY MANAGEMENT **************************/
     while (1) {
         incrementClock(0, 45000);
+        if (*SC_secs >= sec) {
+            sec++;
+            printMapLog();
+        }
+        
         //if it's time to fork a new user AND we're under the user limit
         if (isTimeToSpawnProc() && (currentusers < maxusers) ) {
             forkUser();
@@ -238,7 +255,8 @@ int main(int argc, char** argv) {
         
         //if user is terminating
         if (msg.terminating == 1) {
-            printf("OSS: user %02i reported termination\n", msg.userpid); //***********log & add time
+            fprintf(mlog, "OSS: user %i reported termination at %u:%09u\n",
+                    msg.userpid, *SC_secs, *SC_ns);
             terminateUser(msg.userpid, msg.user_sys_pis);
             stats.normal_terminations++;
             currentusers--;
@@ -249,7 +267,9 @@ int main(int argc, char** argv) {
         //if user makes an invalid request
         else if ( (msg.userpagenum < 0) || (msg.userpagenum > 31) ) {
             stats.segfault_terminations++;
-            printf("OSS: user %02i made an invalid memory request, terminating it\n", msg.userpid); //***********log & add time
+            fprintf(mlog, "OSS: user %i has made an invalid memory request "
+                    "(segfault) at %u:%09u ... terminating user\n", 
+                    msg.userpid, *SC_secs, *SC_ns);
             userbitvector[msg.userpid] = 0; //clear bit vector slot
             terminateUser(msg.userpid, msg.user_sys_pis);
             currentusers--;
@@ -332,12 +352,13 @@ void printStats() {
     double avgms = avgspd*.000001;
     printf("OSS: average memory access speed: %f ns or %f ms\n", avgspd, avgms);
     //segfaults
-    printf("Users committed segfaults and terminated by OSS: %i\n", 
+    printf("OSS: Users committed segfaults and terminated by OSS: %i\n", 
         stats.segfault_terminations);
     //throughput
     double thru = (double)stats.normal_terminations/y;
     printf("OSS: throughput: %f users completed per second, with %i still"
             " running upon OSS termination\n", thru, currentusers);
+    fclose(mlog);
 }
 
 void printvector() {
@@ -563,7 +584,7 @@ void terminateUser(int simpid, pid_t syspid) {
             mem->pagelocation[page] = -1;
         }
     }
-    if (stats.normal_terminations % 10 == 0) {
+    if (stats.normal_terminations % 5 == 0) {
         printf("OSS: after terminating user %i:\n", simpid);
         printMap();
     }
@@ -574,6 +595,8 @@ void forkUser() {
     userbitvector[next_pnum] = 1;
     printf("OSS: forking user %02i ... now %i concurrent users\n", 
         next_pnum, currentusers+1);
+    fprintf(mlog, "OSS: spawning user %i at %u:%09u ... now %i concurrent users"
+            "\n", next_pnum, *SC_secs, *SC_ns, currentusers);
     if (next_pnum == -1) {
         printf("OSS: Error: attempted to fork user with full"
                " user bitvector\n");
@@ -604,6 +627,61 @@ int nextUserNumber() {
         }
     }
     return -1;
+}
+
+void printMapLog() {
+    int i;
+    //printf("Memory map:\n");
+    //printf("[U=used frame, D=dirty frame, 0/1=refbit, .=unused]\n");
+    fprintf(mlog, "Current head pointer position: frame %i\n", mem->refptr);
+    //status of first 128 frames
+    for (i=0; i<128; i++) {
+        if (i==0) fprintf(mlog, "[");
+        if (mem->bitvector[i] == 0) fprintf(mlog, ".");
+        else if (mem->dirtystatus[i] == 0) fprintf(mlog, "U");
+        else fprintf(mlog, "D");
+        if (i==31 || i== 63) fprintf(mlog, "][");
+        else if (i==95) fprintf(mlog, "][");
+        else if (i==127) fprintf(mlog, "]");
+    }
+    fprintf(mlog, "\n");
+    //status of first 64 reference bits
+    for (i=0; i<128; i++) {
+        if (i==0) fprintf(mlog, "[");
+        if (mem->bitvector[i] == 1) {
+            if (mem->refbit[i] == 0) fprintf(mlog, "0");
+            else fprintf(mlog, "1");
+        }
+        else fprintf(mlog, ".");
+        if (i==31 || i== 63) fprintf(mlog, "][");
+        else if (i==95) fprintf(mlog, "][");
+        else if (i==127) fprintf(mlog, "]");
+    }
+    fprintf(mlog, "\n");
+    //status of frames 128-255
+    for (i=128; i<256; i++) {
+        if (i==128) fprintf(mlog, "[");
+        if (mem->bitvector[i] == 0) fprintf(mlog, ".");
+        else if (mem->dirtystatus[i] == 0) fprintf(mlog, "U");
+        else fprintf(mlog, "D");
+        if (i==159 || i==191) fprintf(mlog, "][");
+        else if (i==223) fprintf(mlog, "][");
+        else if (i==255) fprintf(mlog, "]");
+    }
+    fprintf(mlog, "\n");
+    //status of reference bits on frames 128-191
+    for (i=128; i<256; i++) {
+        if (i==128) fprintf(mlog, "[");
+        if (mem->bitvector[i] == 1) {
+            if (mem->refbit[i] == 0) fprintf(mlog, "0");
+            else fprintf(mlog, "1");
+        }
+        else fprintf(mlog, ".");
+        if (i==159 || i==191) fprintf(mlog, "][");
+        else if (i==223) fprintf(mlog, "][");
+        else if (i==255) fprintf(mlog, "]");
+    }
+    fprintf(mlog, "\n");
 }
 
 void printMap(){
