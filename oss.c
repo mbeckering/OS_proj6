@@ -48,6 +48,7 @@ void prepMessage(); //preps msg struct with no real info, just so user loops
 int nextOpenFrame(); //returns next open frame, -1 if all frames are full
 void pageToFrame(int, int, int); //sends page arg1 to frame arg2, arg3 dirtybit
 int frameToReplace(); //parses frames (clock algo) and returns frame# to replace
+void incrementAccessTime(unsigned int); //takes ns, accrues access time for stats
 
 void initQueue(); //initialize the suspended queue
 int numSuspendedProcs(); //returns number of suspended user processes
@@ -84,10 +85,14 @@ pid_t childpid; //for determining child code after fork
 int next_pnum = 0; //sim pid for next user process
 int maxusers; //max concurrent users
 
-//struct for storing those sweet statistics
+//struct for storing those sweet statistics, variables should be clear
 struct statistics {
     int normal_terminations;
     int segfault_terminations;
+    int num_pagefaults;
+    int num_accesses;
+    unsigned int access_secs;
+    unsigned int access_ns;
 };
 
 struct statistics stats;
@@ -253,6 +258,7 @@ int main(int argc, char** argv) {
         
         //handle user request
         else {
+            stats.num_accesses++;
             //if its a hit, set ref bit, adv clock, send msg
             frameresult = findPage(msg.userpid, msg.userpagenum);
             if (frameresult != -1) {
@@ -260,17 +266,20 @@ int main(int argc, char** argv) {
                 //if it's a read request, advance clock 10ns
                 if (msg.rw == 0) {
                     incrementClock(0, 10);
+                    incrementAccessTime(10);
                 }
                 //if it's a write request, advance clock more and set dirty bit
                 else if (msg.rw == 1) {
                     mem->dirtystatus[frameresult] = 1;
                     incrementClock(0, 350);
+                    incrementAccessTime(350);
                 }
                 prepMessage();
                 sendMessage(msg.userpid);
             }
             //else page fault, select an empty frame to fill or a frame to replace
             else {
+                stats.num_pagefaults++;
                 next_open_frame = nextOpenFrame();
                 //if memory is full, need to select a page to replace
                 if (next_open_frame == -1) {
@@ -300,12 +309,35 @@ int main(int argc, char** argv) {
 /*************************** FUNCTION DEFINITIONS *****************************/
 
 void printStats() {
+    double secs = *SC_secs;
+    double ns = *SC_ns;
+    double x = (double)ns/BILLION;
+    double y = (double)secs + x;
     printf("OSS: memory map upon OSS termination:\n");
     printMap();
+    printf("OSS: termination at %u:%09u\n", *SC_secs, *SC_ns);
     printf("Users terminated successfully: %i\n", stats.normal_terminations);
+    //memory accesses per second
+    printf("OSS: total memory accesses: %i\n", stats.num_accesses);
+    double aps = (double)stats.num_accesses/y;
+    printf("OSS: memory accesses per second: %f\n", aps);
+    //page faults per memory access
+    printf("OSS: total page faults: %i\n", stats.num_pagefaults);
+    double fpa = (double)stats.num_pagefaults/(double)stats.num_accesses;
+    printf("OSS: number of page faults per memory access: %f\n", fpa);
+    //average memory access speed
+    double a = (double)stats.access_ns/BILLION;
+    double b = (double)stats.access_secs+ a;
+    double avgspd = (double)stats.num_accesses/b;
+    double avgms = avgspd*.000001;
+    printf("OSS: average memory access speed: %f ns or %f ms\n", avgspd, avgms);
+    //segfaults
     printf("Users committed segfaults and terminated by OSS: %i\n", 
         stats.segfault_terminations);
-    printf("OSS: termination at %u:%09u\n", *SC_secs, *SC_ns);
+    //throughput
+    double thru = (double)stats.normal_terminations/y;
+    printf("OSS: throughput: %f users completed per second, with %i still"
+            " running upon OSS termination\n", thru, currentusers);
 }
 
 void printvector() {
@@ -329,6 +361,7 @@ void unsuspendUser(int pnum) {
     msg.msgtyp = (pnum + 100);
     msg.userpid = pnum;
     sendMessage(pnum);
+    incrementAccessTime(15000000); //15ms to access time upon completion
 }
 
 void setTimeToReady(int pnum, unsigned int readtime) {
@@ -670,6 +703,17 @@ int isTimeToSpawnProc() {
     return return_val;
 }
 
+void incrementAccessTime(unsigned int ns) {
+    unsigned int temp;
+    stats.access_ns += ns;
+    //rollover nanoseconds offset if needed
+    if (stats.access_ns >= BILLION) {
+        stats.access_secs++;
+        temp = stats.access_ns - BILLION;
+        stats.access_ns = temp;
+    }
+}
+
 void incrementClock(unsigned int add_secs, unsigned int add_ns) {
     unsigned int localsec = *SC_secs;
     unsigned int localns = *SC_ns;
@@ -723,7 +767,6 @@ void initIPC() {
 }
 
 void clearIPC() {
-    printf("OSS: Clearing IPC resources...\n");
     //close shared memory (sim clock)
     if ( shmctl(shmid_sim_secs, IPC_RMID, NULL) == -1) {
         perror("OSS: error removing shared memory");
@@ -799,15 +842,13 @@ static void interrupt(int signo, siginfo_t *info, void *context) {
     killchildren();
     printStats();
     clearIPC();
-    printf("OSS: Terminated: Timed Out\n");
     exit(0);
 }
 
 static void siginthandler(int sig_num) {
-    printf("\nOSS: Interrupt detected! signo = %d\n", getpid(), sig_num);
+    printf("\nOSS: Interrupt detected! signo = %d\n", sig_num);
     //fprintf(mlog, "OSS: Terminated: Interrupted by SIGINT\n");
     killchildren();
-    //printStats();
     clearIPC();
     printf("OSS: Terminated: Interrupted\n");
     exit(0);
