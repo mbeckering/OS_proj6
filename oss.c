@@ -49,6 +49,18 @@ int nextOpenFrame(); //returns next open frame, -1 if all frames are full
 void pageToFrame(int, int, int); //sends page arg1 to frame arg2, arg3 dirtybit
 int frameToReplace(); //parses frames (clock algo) and returns frame# to replace
 
+void initQueue(); //initialize the suspended queue
+int numSuspendedProcs(); //returns number of suspended user processes
+int getNextProcFromQueue(); //returns pid of next proc in queue, -1 if empty
+int addProcToQueue(int); //takes proc_num, returns 1 if successful, else -1
+int removeProcFromQueue(int); //proc_num, returns 1 if successful, else -1
+void setTimeToReady(int, unsigned int); //takes user number and # nanoseconds
+int isReady(int); //takes user num, returns 1 if read time has passed
+void unsuspendUser(int); //updates suspended queue and messages user
+
+void printQueue(); //these functions for obliterating bugs
+void printClock();
+
 /************************* GLOBAL VARIABLES ***********************************/
 
 int shmid_sim_secs, shmid_sim_ns; //shared memory ID holders for sim clock
@@ -71,7 +83,7 @@ pid_t childpid; //for determining child code after fork
 int next_pnum = 0; //sim pid for next user process
 int maxusers; //max concurrent users
 
-//shared memory data structure for our system info needs
+//data structure for our system info needs
 struct memory {
     int refbit[256]; //reference bit array: 0=lastchance 1=referenced
     int dirtystatus[256]; //dirty bit array: 0=clean, 1=dirty
@@ -85,6 +97,15 @@ struct memory {
 
 struct memory *mem; //struct pointer for our memory information
 struct memory memstruct; //actual struct
+
+//struct for storing suspended requests
+struct suspended {
+    int queue[18]; //the actual queue of suspended process id's
+    unsigned int ready_sec[18]; //time when ready to un-suspend (seconds)
+    unsigned int ready_ns[18]; //time when ready to un-suspend (nanoseconds)
+};
+
+struct suspended susp;
 
 //struct used in message queues
 struct message {
@@ -111,6 +132,7 @@ int main(int argc, char** argv) {
     int next_open_frame = 0;
     int frame_to_replace = -1;
     int page_to_send = -1;
+    int usernum_unsuspend = -1;
     
     //set up interrupt handling for SIGINT and timed interrupt
     signal (SIGINT, siginthandler);
@@ -143,6 +165,7 @@ int main(int argc, char** argv) {
     }
     printf("OSS: maximum concurrent user processes: %i\n", maxusers);
     
+    initQueue();
     initIPC();
     //set up our page number assignments for users
     setPageNumbers();
@@ -156,9 +179,19 @@ int main(int argc, char** argv) {
     
     /*********************** BEGIN MEMORY MANAGEMENT **************************/
     while (1) {
-        //if all users are waiting on disk read, advance clock
-        
-        //TODO: Advance clock if all users are waiting
+        usernum_unsuspend = getNextProcFromQueue(); //-1 if queue is empty
+        //if next suspended process's read is finished, notify it to continue
+        if ( (usernum_unsuspend != -1) && isReady(usernum_unsuspend)) {
+            unsuspendUser(usernum_unsuspend);
+        }
+        //if all users are waiting on disk read
+        else if (numSuspendedProcs() == maxusers) {
+            usernum_unsuspend = getNextProcFromQueue();
+            //advance clock accordingly
+            *SC_secs = susp.ready_sec[usernum_unsuspend];
+            *SC_ns = susp.ready_ns[usernum_unsuspend];
+            unsuspendUser(usernum_unsuspend);
+        }
         
         //if it's time to fork a new user AND we're under the user limit
         if (isTimeToSpawnProc() && (currentusers < maxusers) ) {
@@ -206,10 +239,10 @@ int main(int argc, char** argv) {
                 if (msg.rw == 0) {
                     incrementClock(0, 10);
                 }
-                //if it's a write request, advance clock 15ms and set dirty bit
+                //if it's a write request, advance clock more and set dirty bit
                 else if (msg.rw == 1) {
                     mem->dirtystatus[frameresult] = 1;
-                    incrementClock(0, 15000000);
+                    incrementClock(0, 150);
                 }
                 prepMessage();
                 sendMessage(msg.userpid);
@@ -223,21 +256,15 @@ int main(int argc, char** argv) {
                     pageToFrame(pagenumber[msg.userpid][msg.userpagenum],
                             frame_to_replace, 0);
                     mem->pagetable[msg.userpid][msg.userpagenum] = frame_to_replace;
-                    prepMessage();
-                    sendMessage(msg.userpid);
-                    //increment 15ms to represent disk read
-                    incrementClock(0, 15000000);
                 }
-                //otherwise, place this page in the next open frame
+                //memory not full, so place this page in the next open frame
                 else {
                     page_to_send = pagenumber[msg.userpid][msg.userpagenum];
                     pageToFrame(page_to_send, next_open_frame, 0);
                     mem->pagetable[msg.userpid][msg.userpagenum] = next_open_frame;
-                    prepMessage();
-                    sendMessage(msg.userpid);
-                    //increment 15ms to represent disk read
-                    incrementClock(0, 15000000);
                 }
+                setTimeToReady(msg.userpid, 15000000);
+                addProcToQueue(msg.userpid);
             }
         }
     }
@@ -245,11 +272,106 @@ int main(int argc, char** argv) {
     
     clearIPC();
     killchildren();
-
     return (EXIT_SUCCESS);
 }
 
 /*************************** FUNCTION DEFINITIONS *****************************/
+
+void printClock() {
+    printf("OSS time: %u:%09u\n", *SC_secs, *SC_ns);
+}
+
+void unsuspendUser(int pnum) {
+    //update blocked queue
+    removeProcFromQueue(pnum);
+    //notify user to continue
+    msg.msgtyp = (pnum + 100);
+    msg.userpid = pnum;
+    sendMessage(pnum);
+}
+
+void setTimeToReady(int pnum, unsigned int readtime) {
+    unsigned int temp;
+    unsigned int localsecs = *SC_secs;
+    unsigned int localns = *SC_ns;
+    susp.ready_sec[pnum] = localsecs;
+    susp.ready_ns[pnum] = localns + readtime;
+    if (susp.ready_ns[pnum] >= BILLION) { //roll ns to s if > bill
+        susp.ready_sec[pnum]++;
+        temp = susp.ready_ns[pnum] - BILLION;
+        susp.ready_ns[pnum] = temp;
+    }
+}
+
+int isReady(int pnum) {
+    int return_val = 0;
+    unsigned int localsec = *SC_secs;
+    unsigned int localns = *SC_ns;
+    if ( (localsec > susp.ready_sec[pnum]) || 
+            ( (localsec >= susp.ready_sec[pnum]) && 
+            (localns >= susp.ready_ns[pnum]) ) ) {
+        return_val = 1;
+    }
+    return return_val;
+}
+
+int numSuspendedProcs() {
+    int i, return_val;
+    for (i=0; i<18; i++) {
+        if (susp.queue[i] != -1) {
+            return_val++;
+        }
+    }
+    return return_val;
+}
+
+void printQueue() {
+    int i;
+    for (i=0; i<18; i++) {
+        printf("%i, ", susp.queue[i]);
+    }
+    printf("\n");
+}
+
+int removeProcFromQueue(int proc_num) {
+    int i;
+    for (i=0; i<18; i++) {
+        if (susp.queue[i] == proc_num) { //found the process to remove from queue
+            while(i+1 < 18) { //shift next in queue down 1, repeat
+                susp.queue[i] = susp.queue[i+1];
+                i++;
+            }
+            susp.queue[17] = -1; //once 18 is moved to 17, clear it up by setting to 0
+            return 1;
+        }
+    }
+    return -1;
+}
+
+int addProcToQueue (int proc_num) {
+    int i;
+    for (i=0; i<maxusers; i++) {
+        if (susp.queue[i] == -1) { //empty queue spot found
+            susp.queue[i] = proc_num;
+            return 1;
+        }
+    }
+    return -1; //no empty spot found
+}
+
+int getNextProcFromQueue() {
+    if (susp.queue[0] == -1) { //queue is empty
+        return -1;
+    }
+    else return susp.queue[0];
+}
+
+void initQueue() {
+    int i;
+    for(i=0; i<18; i++) {
+        susp.queue[i] = -1;
+    }
+}
 
 int frameToReplace() {
     int framenum;
@@ -625,6 +747,7 @@ static void interrupt(int signo, siginfo_t *info, void *context) {
     //fprintf(mlog, "OSS: Terminated: Timed Out\n");
     printf("OSS: Memory map before termination:\n");
     printMap();
+    printClock();
     killchildren();
     //printStats();
     clearIPC();
