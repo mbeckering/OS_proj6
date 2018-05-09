@@ -49,7 +49,8 @@ int nextOpenFrame(); //returns next open frame, -1 if all frames are full
 void pageToFrame(int, int, int); //sends page arg1 to frame arg2, arg3 dirtybit
 int frameToReplace(); //parses frames (clock algo) and returns frame# to replace
 void incrementAccessTime(unsigned int); //takes ns, accrues access time for stats
-void printMapLog();
+void printMapLog(); //prints the current memory map to the log file
+void fprintStats(); //prints statistics to the log file
 
 void initQueue(); //initialize the suspended queue
 int numSuspendedProcs(); //returns number of suspended user processes
@@ -327,15 +328,46 @@ int main(int argc, char** argv) {
 }
 
 /*************************** FUNCTION DEFINITIONS *****************************/
+void fprintStats() {
+    double secs = *SC_secs;
+    double ns = *SC_ns;
+    double x = (double)ns/BILLION;
+    double y = (double)secs + x;
+    fprintf(mlog, "\nOSS: termination at %u:%09u\n\n", *SC_secs, *SC_ns);
+    fprintf(mlog, "OSS: memory map upon OSS termination:\n");
+    printMapLog();
+    fprintf(mlog, "Users terminated successfully: %i\n", stats.normal_terminations);
+    //memory accesses per second
+    fprintf(mlog, "OSS: total memory accesses: %i\n", stats.num_accesses);
+    double aps = (double)stats.num_accesses/y;
+    fprintf(mlog, "OSS: memory accesses per second: %f\n", aps);
+    //page faults per memory access
+    fprintf(mlog, "OSS: total page faults: %i\n", stats.num_pagefaults);
+    double fpa = (double)stats.num_pagefaults/(double)stats.num_accesses;
+    fprintf(mlog, "OSS: number of page faults per memory access: %f\n", fpa);
+    //average memory access speed
+    double a = (double)stats.access_ns/BILLION;
+    double b = (double)stats.access_secs+ a;
+    double avgspd = (double)stats.num_accesses/b;
+    double avgms = avgspd*.000001;
+    fprintf(mlog, "OSS: average memory access speed: %f ns or %f ms\n", avgspd, avgms);
+    //segfaults
+    fprintf(mlog, "OSS: Users committed segfaults and terminated by OSS: %i\n", 
+        stats.segfault_terminations);
+    //throughput
+    double thru = (double)stats.normal_terminations/y;
+    fprintf(mlog, "OSS: throughput: %f users completed per second, with %i still"
+            " running upon OSS termination\n", thru, currentusers);
+}
 
 void printStats() {
     double secs = *SC_secs;
     double ns = *SC_ns;
     double x = (double)ns/BILLION;
     double y = (double)secs + x;
+    printf("\nOSS: termination at %u:%09u\n\n", *SC_secs, *SC_ns);
     printf("OSS: memory map upon OSS termination:\n");
     printMap();
-    printf("OSS: termination at %u:%09u\n", *SC_secs, *SC_ns);
     printf("Users terminated successfully: %i\n", stats.normal_terminations);
     //memory accesses per second
     printf("OSS: total memory accesses: %i\n", stats.num_accesses);
@@ -917,7 +949,9 @@ static int setinterrupt() {
 
 static void interrupt(int signo, siginfo_t *info, void *context) {
     printf("OSS: Timer interrupt detected! signo = %d\n", signo);
+    fprintf(mlog, "OSS: Timed interrupt detected at %u:%09u\n", *SC_secs, *SC_ns);
     killchildren();
+    fprintStats();
     printStats();
     clearIPC();
     exit(0);
